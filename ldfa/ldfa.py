@@ -3,7 +3,7 @@ import time
 import numpy as np
 from scipy import linalg
 
-import miccs.optimize as core
+import ldfa.optimize as core
 
 def _generate_lambda_glasso(bin_num, lambda_glasso, offset, lambda_diag=None):
     lambda_glasso_out = np.full((bin_num, bin_num), -1) + (1+lambda_glasso) * \

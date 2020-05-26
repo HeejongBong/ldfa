@@ -26,9 +26,9 @@ def get_numpy_status():
         numpy_status['version'] = ""
     return numpy_status
 
-def setup_miccs():
+def setup_ldfa():
     numpy_status = get_numpy_status()
-    numpy_req_str = "CDFA requires NumPy >= {0}.\n".format(numpy_min_version)      
+    numpy_req_str = "ldfa requires NumPy >= {0}.\n".format(numpy_min_version)      
 
     if numpy_status['up_to_date'] is False:
         if numpy_status['version']:
@@ -44,20 +44,20 @@ def setup_miccs():
     from numpy.distutils.system_info import get_info
 
     lapack_info = get_info('lapack_opt',1)
-    sources = ['cdfa/optimize/lasso.f90',
-               'cdfa/optimize/glasso.f90', 'cdfa/optimize/glasso_p.f90']
+    sources = ['ldfa/optimize/lasso.f90',
+               'ldfa/optimize/glasso.f90', 'ldfa/optimize/glasso_p.f90']
 
     if lapack_info:
-        ext = Extension(name='cdfa.optimize', sources=sources,
+        ext = Extension(name='ldfa.optimize', sources=sources,
                         **lapack_info)
 
     if not lapack_info:
         raise('No BLAS or Lapack libraries found')
 
     setup(
-        name='cdfa',
+        name='ldfa',
         version="0.0.1",
-        description="MICCS: Multiset Inverse Canonical Correlation Sparsification",
+        description="LDFA-H: latent dynamic factor analysis of high-dimensional time series",
         author="Heejong Bong, Zongge Liu",
         author_email="hbong@andrew.cmu.edu",
         url="http://github.com/HeejongBong/miccs",
@@ -68,9 +68,9 @@ def setup_miccs():
             'Programming Language :: Fortran',
             'Topic :: Scientific/Engineering',
             ],
-        packages = ['cdfa'],
+        packages = ['ldfa'],
         install_requires = ['numpy', 'matplotlib', 'scipy'],
         ext_modules = [ext])
 
 if __name__ == '__main__':
-    setup_miccs()
+    setup_ldfa()
