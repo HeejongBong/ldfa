@@ -1,2 +1,1 @@
-# cdfa
-CDFA: Cross-region Dynamic Factor Analysis
+# LDFA-H: Latent Dynamic Factor Analysis for High-dimensional time series
