@@ -60,7 +60,7 @@ def setup_ldfa():
         description="LDFA-H: latent dynamic factor analysis of high-dimensional time series",
         author="Heejong Bong, Zongge Liu",
         author_email="hbong@andrew.cmu.edu",
-        url="http://github.com/HeejongBong/miccs",
+        url="http://github.com/HeejongBong/ldfa",
         license="MIT License",
         classifiers=[
             'License :: OSI Approved :: MIT License',
