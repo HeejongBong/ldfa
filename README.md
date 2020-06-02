@@ -1,4 +1,4 @@
-# LDFA-H: Latent Dynamic Factor Analysis of High-dimensional time series (Anonymized)
+# LDFA-H: Latent Dynamic Factor Analysis of High-dimensional time series
 
 This repo consists of 
 1. Python package `ldfa` which implements LDFA-H [[1](#20)]
@@ -18,7 +18,7 @@ Package `ldfa` requires:
 
 Clone this repo through github:
 ```bash
-git clone https://github.com/AutoAnonymous/ldfa_anon.git
+git clone https://github.com/AutoAnonymous/ldfa.git
 ```
 
 ### `Python` install
