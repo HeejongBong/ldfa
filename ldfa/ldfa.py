@@ -12,256 +12,32 @@ def _generate_lambda_glasso(bin_num, lambda_glasso, offset, lambda_diag=None):
         lambda_glasso_out[np.arange(bin_num), np.arange(bin_num)] = lambda_diag
     return lambda_glasso_out
 
-def fit(data, lambda_cross, offset_cross, 
-        lambda_auto=None, offset_auto=None, 
-        ths_dfa=1e-3, max_dfa=1000, ths_glasso=1e-5, max_glasso=1000,
-        ths_lasso=1e-5, max_lasso=1000, beta_init=None,
-        switch=False, verbose=False):
+def _switch_back(Sigma, Phi_S, Gamma_T, Phi_T, beta):
+    """Function to make the initial Phi_S positive definite"""
+    w, v = np.linalg.eig(Sigma)
+    sqrtS = (v*np.sqrt(w)[...,None,:])@v.transpose(0,2,1)
+    alpha = np.min(np.linalg.eigvals(
+        sqrtS @ linalg.block_diag(*Gamma_T) @ sqrtS),-1)/2
     
-    num_time = data[0].shape[0]
-    dims = [dat.shape[1] for dat in data]
-    num_trial = data[0].shape[2]
+    return (Sigma - alpha[:,None,None]*linalg.block_diag(*Phi_T), 
+            [P + (b*alpha)@b.T for P, b in zip(Phi_S, beta)])
 
-    # get full_graph
-    if lambda_auto is None:
-        lambda_auto = lambda_cross
-    if offset_auto is None:
-        offset_auto = offset_cross
-    lambda_glasso_auto = _generate_lambda_glasso(num_time, lambda_auto, 
-                                                 offset_auto)
-    lambda_glasso_cross = _generate_lambda_glasso(num_time, lambda_cross,
-                                                  offset_cross)
-    lambda_glasso = np.array(np.block(
-        [[lambda_glasso_auto if j==i else lambda_glasso_cross
-          for j, _ in enumerate(data)]
-         for i, _ in enumerate(data)]))
+def _make_PD(m, thres_eigen=1e-4):
+    """Function to make a coariance PSD based on its eigen decomposition"""
+    s, v = np.linalg.eigh(m)
+    if np.min(s)<=thres_eigen*np.max(s):
+        delta = thres_eigen*np.max(s) - np.min(s)
+        s = s + delta
+    return (v@np.diag(s)@np.linalg.inv(v))
+
+def _temporal_est(V_eps_T, ar_order):
+    """Perform temporal estimate given V_T
     
-    # initialization by CCA
-    m_x = [np.mean(dat, -1) for dat in data]
-    S_xt = np.cov(*[dat.transpose([1,0,2]).reshape([d,-1])
-                    for dat, d in zip(data, dims)])
+    Keyword Arguments:
+    V_eps_T: V_T for noise
+    ar_order: the bandwidth
     
-    if beta_init:
-        beta = [b.copy() for b in beta_init]
-    else:
-        S_1 = S_xt[:dims[0],:dims[0]]
-        S_12 = S_xt[:dims[0],dims[0]:]
-        S_2 = S_xt[dims[0]:,dims[0]:]
-        U_1= linalg.inv(linalg.sqrtm(S_1))
-        U_2 = linalg.inv(linalg.sqrtm(S_2))
-        u, s, vh = np.linalg.svd(U_1 @ S_12 @ U_2)
-        beta = [U_1 @ u[:,0], U_2 @ vh[0]]
-    beta = [b/np.sqrt(np.sum(b**2)) for b in beta]
-
-    m_z_x = np.concatenate([np.matmul(b, dat-m[...,None]) 
-             for m, b, dat in zip(m_x, beta, data)])
-    V_z_x = np.zeros((num_time*len(dims), num_time*len(dims)))
-    m_zk_x = np.reshape(m_z_x, (len(dims), num_time, -1))
-    V_zk_x = np.diagonal(V_z_x.reshape((len(dims),num_time,len(dims),num_time)),
-                         0,0,2).transpose((2,0,1))
-
-    mu = [np.mean(dat - m[:,None,:] * b[:,None], -1) 
-          for dat, m, b in zip(data, m_zk_x, beta)]
-
-    m_eps = [dat - m[:,None,:] * b[:,None] 
-             - np.mean(dat - m[:,None,:] * b[:,None], -1)[...,None]
-             for dat, m, b in zip(data, m_zk_x, beta)]
-    v_eps = [(np.sum(np.square(m))/num_trial + np.sum(np.diag(V))) #/(d-1)
-             for m, V, d in zip(m_eps, V_zk_x, dims)]
-
-    V_eps_S = [np.tensordot(m.transpose([1,0,2]).reshape([d,-1]),
-                            m.transpose([1,0,2]).reshape([d,-1]).T, 1)
-               /num_trial/v + np.sum(np.diag(V))*b*b[:,None]/v
-               for m, V, v, b, d in zip(m_eps, V_zk_x, v_eps, beta, dims)]
-    V_eps_T = [np.tensordot(m.reshape([num_time,-1]),
-                            (np.linalg.pinv(V2) @ m).reshape([num_time,-1]).T, 1)
-               /d/num_trial + (b @ np.linalg.pinv(V2) @ b) * V1 / d
-               for m, V1, V2, b, d in zip(m_eps, V_zk_x, V_eps_S, beta, dims)]
-    sd_eps_T = [np.sqrt(np.diag(V)) for V in V_eps_T]
-    R_eps_T = [V/sd/sd[:,None] for V, sd in zip(V_eps_T, sd_eps_T)]
-    Phi_T = [R*sd*sd[:,None] for sd, R in zip(sd_eps_T, R_eps_T)]
-    Theta_T = [np.linalg.inv(P) for P in Phi_T]
-
-    V_z = np.concatenate(m_zk_x,0) @ np.concatenate(m_zk_x).T / num_trial + V_z_x
-    Sigma, Phi_S = switch_forward(V_z, V_eps_S, Phi_T, beta)
-
-    sig = np.sqrt(np.diag(Sigma))
-    Rho = Sigma/sig/sig[:,None] 
-    Pi = np.linalg.inv(Rho)
-    Omega = Pi/sig/sig[:,None]
-    Sigma = np.linalg.inv(Omega)
-
-    Sigma, Phi_S = switch_back(Sigma, Phi_S, Theta_T, Phi_T, beta)
-    Omega = np.linalg.inv(Sigma)
-    Theta_S = [np.linalg.inv(P) for P in Phi_S]
-    
-    # EM algorithm
-    for iter_dfa in np.arange(max_dfa):
-        invPi_last = np.linalg.inv(Pi)
-        beta_ldfa = [b.copy() for b in beta]
-        start_dfa = time.time()
-
-        # E-step for Z
-        V_z_x = linalg.inv(Omega + linalg.block_diag(*[b @ Ts @ b * Tt 
-            for b, Ts, Tt in zip(beta, Theta_S, Theta_T)]))
-        m_z_x = V_z_x @ np.concatenate([Tt @ np.tensordot(Ts@b, dat-m[...,None], (0,1))
-            for Tt,Ts,b,m,dat in zip(Theta_T,Theta_S,beta,mu,data)])
-        m_zk_x = np.reshape(m_z_x, (len(dims), num_time, -1))
-        V_zk_x = np.diagonal(V_z_x.reshape(
-            (len(dims),num_time,len(dims),num_time)),0,0,2).transpose((2,0,1))
-
-        for iter_pb in np.arange(10):
-            beta_last = [b.copy() for b in beta]
-
-            # E-step for eps
-            m_eps = [dat - m[:,None,:] * b[:,None] 
-                     - np.mean(dat - m[:,None,:] * b[:,None], -1)[...,None]
-                     for dat, m, b in zip(data, m_zk_x, beta)]
-            v_eps = [(np.sum(np.square(m))/num_trial + np.sum(np.diag(V))) #/(d-1)
-                     for m, V, d in zip(m_eps, V_zk_x, dims)]
-
-            # fitting Matrix-variate for Phi_S
-            V_eps_S = [np.tensordot(m.transpose([1,0,2]).reshape([d,-1]),
-                                    m.transpose([1,0,2]).reshape([d,-1]).T, 1)
-                       /num_trial/v + np.sum(np.diag(V))*b*b[:,None]/v
-                       for m, V, v, b, d in zip(m_eps, V_zk_x, v_eps, beta, dims)]
-            Phi_S = [V.copy() for V in V_eps_S]
-
-            # fitting Matrix_variate for Phi_T
-            V_eps_T = [np.tensordot(m.reshape([num_time,-1]),
-                                    (np.linalg.inv(V2) @ m).reshape([num_time,-1]).T, 1)
-                       /d/num_trial + (b @ np.linalg.inv(V2) @ b) * V1 / d
-                       for m, V1, V2, b, d in zip(m_eps, V_zk_x, V_eps_S, beta, dims)]
-
-            sd_eps_T = [np.sqrt(np.diag(V)) for V in V_eps_T]
-            R_eps_T = [V/sd/sd[:,None] for V, sd in zip(V_eps_T, sd_eps_T)]
-            for i, (Rt, sd, d) \
-            in enumerate(zip(R_eps_T, sd_eps_T, dims)):
-                Tt, Pt = temporal_est(Rt, offset_auto)
-
-                Theta_T[i] = Tt / sd / sd[:,None]
-                Phi_T[i] = Pt * sd * sd[:,None]
-
-            # coordinate descent for beta
-            Cov_mz_X = [(m-np.mean(m, -1)[...,None]) @ 
-                        (dat - np.mean(dat, -1)[...,None]).transpose([0, 2, 1])
-                        /num_trial for m, dat in zip(m_zk_x, data)]
-            Cov_z = [(m-np.mean(m, -1)[...,None]) @ (m-np.mean(m, -1)[...,None]).T
-                       /num_trial + V for m, V in zip(m_zk_x, V_zk_x)]
-
-            beta = [np.sum(T[...,None] * C1, (0, 1)) / np.sum(T * C2)
-                    for T, C1, C2 in zip(Theta_T, Cov_mz_X, Cov_z)]
-
-            beta_diff = [1-b1@b2/np.sqrt(np.sum(b1**2)*np.sum(b2**2)) 
-                         for b1, b2 in zip(beta, beta_last)]
-            if np.max(beta_diff) < 1e-12:
-                break
-
-        # M-step for mu
-        mu = [np.mean(dat - m[:,None,:] * b[:,None], -1) 
-              for dat, m, b in zip(data, m_zk_x, beta)]
-
-        # M-step for Sigma
-        V_z = np.cov(m_z_x) + V_z_x
-        Sigma = V_z.copy()
-
-        # Normalize beta
-        B = np.concatenate([np.full(num_time, np.sqrt(np.sum(b**2)))
-                            for b in beta])
-        Sigma = Sigma * B * B[:,None]
-        beta = [b / np.sqrt(np.sum(b**2)) for b in beta]
-
-        # Switch forward
-        if switch:
-            Sigma, Phi_S = switch_forward(Sigma, Phi_S, Phi_T, beta)
-
-        # M-step for Pi
-        sig = np.sqrt(np.diag(Sigma))
-        Rho = Sigma/sig/sig[:,None]
-        core.glasso(Pi, np.linalg.inv(Pi), Rho, lambda_glasso,
-                    ths_glasso, max_glasso, ths_glasso, max_lasso)
-        Omega = Pi/sig/sig[:,None]
-        Sigma = np.linalg.inv(Omega)
-
-        # Switch back
-        if switch:
-            Sigma, Phi_S = switch_back(Sigma, Phi_S, Theta_T, Phi_T, beta)
-            Omega = np.linalg.inv(Sigma)
-            Theta_S = [np.linalg.inv(P) for P in Phi_S]  
-        
-        # Check for convergence
-        change_Sigma = np.max(np.abs(np.linalg.inv(Pi) - invPi_last))
-        change_beta = np.max([1-b1@b2/np.sqrt(np.sum(b1**2)*np.sum(b2**2)) 
-                       for b1, b2 in zip(beta, beta_ldfa)])
-        lapse = time.time() - start_dfa
-        if verbose:
-            print("%d-th dfa iter, change: %f, change_beta: %.2e, lapse: %.2fsec."
-                  %(iter_dfa+1, change_Sigma, change_beta, lapse))
-        if change_Sigma < ths_dfa:
-            break
-            
-    return Pi, Rho, {'Omega': Omega, 'beta': beta, 'mu': mu, 
-                     'Theta_S': Theta_S, 'Theta_T': Theta_T}   
-
-def fit_Pi(data, params, lambda_cross, offset_cross, 
-           lambda_auto=None, offset_auto=None, Pi_init=None,
-           ths_glasso=1e-5, max_glasso=1000, ths_lasso=1e-5, max_lasso=1000, 
-           switch=False, verbose=False):
-    
-    Omega = params['Omega']; mu = params['mu']; beta = params['beta']
-    Theta_S = params['Theta_S']; Theta_T = params['Theta_T']
-    
-    num_time = data[0].shape[0]
-    
-    # get full_graph
-    if lambda_auto is None:
-        lambda_auto = lambda_cross
-    if offset_auto is None:
-        offset_auto = offset_cross
-    lambda_glasso_auto = _generate_lambda_glasso(num_time, lambda_auto, 
-                                                 offset_auto)
-    lambda_glasso_cross = _generate_lambda_glasso(num_time, lambda_cross,
-                                                  offset_cross)
-    lambda_glasso = np.array(np.block(
-        [[lambda_glasso_auto if j==i else lambda_glasso_cross
-          for j, _ in enumerate(data)]
-         for i, _ in enumerate(data)])) 
-    
-    # E-step
-    V_z_x = linalg.inv(Omega + linalg.block_diag(*[b @ Ts @ b * Tt 
-            for b, Ts, Tt in zip(beta, Theta_S, Theta_T)]))
-    m_z_x = V_z_x @ np.concatenate([Tt @ np.tensordot(Ts@b, dat-m[...,None], (0,1))
-        for Tt,Ts,b,m,dat in zip(Theta_T,Theta_S,beta,mu,data)])
-    
-    # M-step for Sigma
-    V_z = np.cov(m_z_x) + V_z_x
-    Sigma = V_z.copy()
-    
-    # Switch forward
-    if switch:
-        Sigma, Phi_S = switch_forward(Sigma, Phi_S, Phi_T, beta)
-            
-    # M-step for Pi
-    sig = np.sqrt(np.diag(Sigma))
-    Rho = Sigma/sig/sig[:,None]
-    if Pi_init:
-        Pi = Pi_init.copy()
-        invPi = np.linalg.inv(Pi)
-    else: 
-        invPi = Rho.copy()
-        Pi = np.linalg.inv(Rho)
-    core.glasso(Pi, invPi, Rho, lambda_glasso,
-                ths_glasso, max_glasso, ths_glasso, max_lasso)
-    
-    # Switch back
-#     if switch:
-#         Sigma, Phi_S = switch_back(Sigma, Phi_S, Theta_T, Phi_T, beta)
-#         Omega = np.linalg.inv(Sigma)
-#         Theta_S = [np.linalg.inv(P) for P in Phi_S] 
-    
-    return Pi, Rho
-
-def temporal_est(V_eps_T, ar_order):
+    """
     num_time = V_eps_T.shape[0]
     resids = np.zeros(num_time)
     Amatrix = np.zeros([num_time, num_time])
@@ -282,32 +58,377 @@ def temporal_est(V_eps_T, ar_order):
     
 #     invIA = np.linalg.pinv(np.eye(num_time) - Amatrix)
 #     Psi_T_hat = invIA @ np.diag(resids) @ invIA.T
-#     Theta_T_hat = np.linalg.inv(Psi_T_hat)
+#     Gamma_T_hat = np.linalg.inv(Psi_T_hat)
     
-    Theta_T_hat = (np.eye(num_time)-Amatrix).T @ np.diag(1/resids) \
+    Gamma_T_hat = (np.eye(num_time)-Amatrix).T @ np.diag(1/resids) \
                   @ (np.eye(num_time)-Amatrix)
-    Psi_T_hat = np.linalg.pinv(Theta_T_hat)
+    Psi_T_hat = np.linalg.pinv(Gamma_T_hat)
     
-    return Theta_T_hat, Psi_T_hat
+    return Gamma_T_hat, Psi_T_hat
 
-def switch_forward(Sigma, Phi_S, Phi_T, beta):
-    U_S = [u for u,_,_ in [np.linalg.svd(b[:,None]) for b in beta]]
-    UtPU = [U.T @ P @ U for U, P in zip(U_S, Phi_S)]
-    ls = [(X[0,0]-X[0,1:]@np.linalg.inv(X[1:,1:])@X[1:,0])
-          /np.sum(b**2)
-          for X, b in zip(UtPU, beta)]
+def fit(data, num_f, lambda_cross, offset_cross, 
+        lambda_auto=None, offset_auto=None, 
+        ths_ldfa=1e-2, max_ldfa=1000, ths_glasso=1e-5, max_glasso=1000,
+        ths_lasso=1e-5, max_lasso=1000, beta_init=None, make_PD=False,
+        verbose=False):
+    """The main function to perform multi-factor estimation.
     
-    return (Sigma + linalg.block_diag(*[l*P for l, P in zip(ls, Phi_T)]), 
-            [P - b * b[:,None] * l for b, P, l in zip(beta, Phi_S, ls)])
+    Keyword Arguments:
+    data: observation data from two areas
+    num_f: number of factors
+    lambda_cross: the lambda penalty on off-diagonal part.
+    """
+    
+    dims = [dat.shape[1] for dat in data]
+    num_time = data[0].shape[2]
+    num_trial = data[0].shape[0]
 
-def switch_back(Sigma, Phi_S, Theta_T, Phi_T, beta):
-    l = np.min(np.linalg.eig(linalg.sqrtm(Sigma) 
-    @ linalg.block_diag(*Theta_T) @ linalg.sqrtm(Sigma))[0])/2
+    # get full_graph
+    if lambda_auto is None:
+        lambda_auto = lambda_cross
+    if offset_auto is None:
+        offset_auto = offset_cross
+    lambda_glasso_auto = _generate_lambda_glasso(num_time, lambda_auto, 
+                                                 offset_auto)
+    lambda_glasso_cross = _generate_lambda_glasso(num_time, lambda_cross,
+                                                  offset_cross)
+    lambda_glasso = np.array(np.block(
+        [[lambda_glasso_auto if j==i else lambda_glasso_cross
+          for j, _ in enumerate(data)]
+         for i, _ in enumerate(data)]))
     
-    return (Sigma - l*linalg.block_diag(*Phi_T), 
-            [P + l*b*b[:,None] for P, b in zip(Phi_S, beta)])  
+    # set mu
+    mu= [np.mean(dat, 0) for dat in data]
     
+    # initialization
+    if beta_init:
+        beta = [b.copy() for b in beta_init]
+        weight = [np.linalg.pinv(b) for b in beta]
+    elif len(data)==2:
+        # initialize beta by CCA
+        S_xt = np.tensordot(
+            np.concatenate([dat-m for dat, m in zip(data,mu)], 1),
+            np.concatenate([dat-m for dat, m in zip(data,mu)], 1),
+            axes=((0,2),(0,2)))/num_trial/num_time
+    
+        S_1 = S_xt[:dims[0],:dims[0]]
+        S_12 = S_xt[:dims[0],dims[0]:]
+        S_2 = S_xt[dims[0]:,dims[0]:]
+        
+        U_1= linalg.inv(linalg.sqrtm(S_1))
+        U_2 = linalg.inv(linalg.sqrtm(S_2))
+        u, s, vh = np.linalg.svd(U_1 @ S_12 @ U_2)
+        
+        weight = [u[:,:num_f].T @ U_1, vh[:num_f] @ U_2]
+        beta = [linalg.inv(U_1) @ u[:,:num_f], linalg.inv(U_2) @ vh[:num_f].T]
+    else:
+        print("Default initialization only supports 2 populations now.")
+        raise
+    weight = [w*np.sqrt(np.sum(b**2, 0))[:,None] for w, b in zip(weight,beta)]
+    beta = [b/np.sqrt(np.sum(b**2, 0)) for b in beta]        
+
+    # initialization on other parameters
+    m_z_x = np.concatenate([np.matmul(w, dat-m)[...,None,:]
+             for m, w, dat in zip(mu, weight, data)], -2)
+    V_z_x = np.zeros((num_f,len(dims),num_time)*2)
+
+    m_zk_x = m_z_x.transpose((2,0,1,3))
+    V_zk_x = np.diagonal(V_z_x,0,1,4).transpose(4,0,1,2,3)
+
+#     mu = [np.mean(dat - b @ m, 0) 
+#           for dat, m, b in zip(data, m_zk_x, beta)]
+
+    m_eps = [dat - b @ m1 - m2
+             for dat, m1, b, m2 in zip(data, m_zk_x, beta, mu)]
+    v_eps = [(np.sum(np.square(m))/num_trial 
+              + np.trace(V.reshape(num_f*num_time,num_f*num_time)))
+              # /(d-1)
+             for m, V, d in zip(m_eps, V_zk_x, dims)]
+
+    V_eps_S = [np.tensordot(m,m,axes=((0,2),(0,2)))/num_trial/v 
+               + b@np.sum(np.diagonal(V,0,1,3),-1)@b.T/v
+               for m, V, v, b, d in zip(m_eps, V_zk_x, v_eps, beta, dims)]
+    V_eps_T = [np.tensordot(m,np.linalg.pinv(V2)@m,
+                            axes=((0,1),(0,1)))/d/num_trial 
+               + np.tensordot(V1,b.T@np.linalg.pinv(V2)@b,axes=([0,2],[0,1]))/d
+               for m, V1, V2, b, d in zip(m_eps, V_zk_x, V_eps_S, beta, dims)]
+
+    Phi_T = [V.copy() for V in V_eps_T]
+    if make_PD:
+        Phi_T = [_make_PD(P) for P in Phi_T]
+    Gamma_T = [np.linalg.inv(P) for P in Phi_T]
+
+    V_zf = (np.diagonal(V_z_x,0,0,3).transpose((4,0,1,2,3))
+         + (m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,2,0))
+         @ m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,0,2))
+         / num_trial).reshape((num_f,len(dims),num_time,len(dims),num_time)))
+
+    Sigma, Phi_S = _switch_back(
+        V_zf.reshape(num_f,len(dims)*num_time,len(dims)*num_time),
+        V_eps_S, Gamma_T, Phi_T, beta)
+    if make_PD:
+        Phi_S = [_make_PD(P) for P in Phi_S]
+        for f in np.arange(num_f):
+            Sigma[f] = _make_PD(Sigma[f])
+        
+    Gamma_S = [np.linalg.inv(P) for P in Phi_S]
+
+    sig = np.sqrt(np.diagonal(Sigma,0,1,2))
+    Rho = Sigma/sig[:,None,:]/sig[:,:,None]
+    Pi = np.linalg.inv(Rho)
+    Omega = Pi/sig[:,None,:]/sig[:,:,None]
+    
+    cost = (- log_like(data, {'Omega': Omega, 'beta': beta, 'mu': mu, 
+                              'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) + 
+              np.sum(np.where(lambda_glasso*np.abs(Pi)>=0, 
+                              lambda_glasso*np.abs(Pi), np.inf)))
+    
+    # EM algorithm
+    for iter_ldfa in np.arange(max_ldfa):
+        Rho_ldfa = Rho.copy()
+        beta_ldfa = [b.copy() for b in beta]
+        cost_ldfa = cost
+        start_ldfa = time.time()
+
+        # E-step
+        W_z_x = np.zeros((num_f,len(dims),num_time)*2)
+        for i, (G_S, G_T, b) in enumerate(zip(Gamma_S, Gamma_T, beta)):
+            W_z_x[:,i,:,:,i,:] += G_T[None,:,None,:]*(b.T@G_S@b)[:,None,:,None]
+        for j, W in enumerate(Omega):
+            W_z_x[j,:,:,j,:,:] += W.reshape(len(dims),num_time,len(dims),num_time)
+        V_z_x = np.linalg.inv(
+            W_z_x.reshape((num_f*len(dims)*num_time,num_f*len(dims)*num_time))) \
+            .reshape((num_f,len(dims),num_time)*2)
+        m_z_x = np.tensordot(
+            np.concatenate([(b.T @ G_S @ (dat - m) @ G_T)[...,None,:]
+                for dat, G_T, G_S, b, m in zip(data, Gamma_T, Gamma_S, beta, mu)], -2),
+            V_z_x, axes=((-3,-2,-1), (0,1,2)))
+
+        V_zk_x = np.diagonal(V_z_x,0,1,4).transpose(4,0,1,2,3)
+        m_zk_x = m_z_x.transpose((2,0,1,3))
+
+        V_zf = (np.diagonal(V_z_x,0,0,3).transpose((4,0,1,2,3))
+             + (m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,2,0))
+             @ m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,0,2))
+             / num_trial).reshape((num_f,len(dims),num_time,len(dims),num_time)))
+        
+        # M-step for Phi, beta
+        for iter_pb in np.arange(10):
+            beta_pb = [b.copy() for b in beta]
+
+            m_eps = [dat - b @ m1 - m2 for dat, m1, b, m2 
+                     in zip(data, m_zk_x, beta, mu)]
+
+            # fitting Matrix-variate for Phi_S
+            V_eps_S = [np.tensordot(m @ G_T,m,axes=((0,2),(0,2)))/num_trial/num_time 
+                       + b@np.sum(V * G_T[:,None,:], (-3,-1))@b.T/num_time
+                       for m, V, G_T, b, d in zip(m_eps, V_zk_x, Gamma_T, beta, dims)]
+            Phi_S = [V.copy() for V in V_eps_S]
+            if make_PD:
+                Phi_S = [_make_PD(P) for P in Phi_S]
+            Gamma_S = [np.linalg.inv(P) for P in Phi_S]
+
+            # fitting Matrix_variate for Phi_T
+            V_eps_T = [np.tensordot(m,G_S@m,axes=((0,1),(0,1)))/d/num_trial 
+                       + np.tensordot(V,b.T@G_S@b,axes=([0,2],[0,1]))/d
+                       for m, V, G_S, b, d in zip(m_eps, V_zk_x, Gamma_S, beta, dims)]
+            Phi_T = [V.copy() for V in V_eps_T]
+            if make_PD:
+                Phi_T = [_make_PD(P) for P in Phi_T]
+            sd_eps_T = [np.sqrt(np.diag(V)) for V in V_eps_T]
+            R_eps_T = [V/sd/sd[:,None] for V, sd in zip(V_eps_T, sd_eps_T)]
+
+            for i, (Rt, sd, d) in enumerate(zip(R_eps_T, sd_eps_T, dims)):
+                Tt, Pt = _temporal_est(Rt, offset_auto)
+                Gamma_T[i] = Tt / sd / sd[:,None]
+                Phi_T[i] = Pt * sd * sd[:,None]
+
+            # coordinate descent for beta
+            beta = [
+                np.tensordot(G_T,np.tensordot(dat-np.mean(dat,0),m,axes=(0,0))/num_trial,
+                             axes=((0,1),(1,3)))
+                @ np.linalg.inv(np.tensordot(G_T,V+np.tensordot(m,m,axes=(0,0))/num_trial,
+                                             axes=((0,1),(1,3))))
+                for G_T, V, dat, m in zip(Gamma_T, V_zk_x, data, 
+                                          [m-np.mean(m,0) for m in m_zk_x])
+            ]
+            
+            # M-step for mu
+#             mu = [np.mean(dat - b @ m, 0) for dat, m, b in zip(data, m_zk_x, beta)]
+
+            beta_diff = [1-np.sum(b1*b2,0)/np.sqrt(np.sum(b1**2,0)*np.sum(b2**2,0)) 
+                         for b1, b2 in zip(beta, beta_pb)]
+            if np.max(beta_diff) < 1e-12:
+                break
+
+        # Normalize beta
+        b_norm = np.concatenate([np.sqrt(np.sum(b**2,0))[:,None] for b in beta], -1)
+        Sigma = (V_zf * b_norm[:,:,None,None,None] * b_norm[:,None,None,:,None]) \
+                 .reshape((num_f,len(dims)*num_time,len(dims)*num_time))
+        beta = [b / np.sqrt(np.sum(b**2, 0)) for b in beta]
+        
+        if make_PD:
+            for f in np.arange(num_f):
+                Sigma[f] = _make_PD(Sigma[f])
+
+        # M-step for Pi
+        sig = np.sqrt(np.diagonal(Sigma,0,1,2))
+        Rho = Sigma/sig[:,None,:]/sig[:,:,None]
+        for i, R in enumerate(Rho):
+            P = Pi[i].copy()
+            core.glasso(P, np.linalg.inv(P), R, lambda_glasso,
+                        ths_glasso, max_glasso, ths_lasso, max_lasso)
+            Pi[i] = P
+        Omega = Pi/sig[:,None,:]/sig[:,:,None]
+
+        # calculate cost
+        cost = (- log_like(data,{'Omega': Omega, 'beta': beta, 'mu': mu, 
+                                 'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) + 
+                  np.sum(np.where(lambda_glasso*np.abs(Pi)>=0, 
+                                  lambda_glasso*np.abs(Pi), np.inf)))
+
+        change_Sigma = np.max(np.abs(Rho - Rho_ldfa))
+        change_beta = np.max([1-np.sum(b1*b2,0)/np.sqrt(np.sum(b1**2,0)*np.sum(b2**2,0)) 
+                         for b1, b2 in zip(beta, beta_ldfa)])
+        change_cost = cost_ldfa - cost
+        lapse = time.time() - start_ldfa
+        if verbose:
+            print("%d-th ldfa iter, dcost: %.2e, dRho: %.2e, dbeta: %.2e,"
+                  "lapse: %.2fsec."
+                  %(iter_ldfa+1, change_cost, change_Sigma, change_beta, lapse))
+
+        if(change_cost < ths_ldfa):
+            break
+
+    return Pi, Rho, {'Omega': Omega, 'beta': beta, 'mu': mu, 
+                     'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}  
+
+def fit_Pi(data, params, lambda_cross, offset_cross, 
+           lambda_auto=None, offset_auto=None, Pi_init=None,
+           ths_glasso=1e-5, max_glasso=1000, ths_lasso=1e-5, max_lasso=1000, 
+           verbose=False):
+    """Conditional estimate of Pi given other parameters"""
+    
+    Omega = params['Omega']; mu = params['mu']; beta = params['beta']
+    Gamma_S = params['Gamma_S']; Gamma_T = params['Gamma_T']
+    
+    dims = [data[0].shape[1], data[1].shape[1]]
+    num_time = data[0].shape[2]
+    num_trial = data[0].shape[0]
+    num_f = Omega.shape[0]
+    
+    # get full_graph
+    if lambda_auto is None:
+        lambda_auto = lambda_cross
+    if offset_auto is None:
+        offset_auto = offset_cross
+    lambda_glasso_auto = _generate_lambda_glasso(num_time, lambda_auto, 
+                                                 offset_auto)
+    lambda_glasso_cross = _generate_lambda_glasso(num_time, lambda_cross,
+                                                  offset_cross)
+    lambda_glasso = np.array(np.block(
+        [[lambda_glasso_auto if j==i else lambda_glasso_cross
+          for j, _ in enumerate(data)]
+         for i, _ in enumerate(data)])) 
+    
+    # E-step
+    W_z_x = np.zeros((num_f,len(dims),num_time)*2)
+    for i, (G_S, G_T, b) in enumerate(zip(Gamma_S, Gamma_T, beta)):
+        W_z_x[:,i,:,:,i,:] += G_T[None,:,None,:]*(b.T@G_S@b)[:,None,:,None]
+    for j, W in enumerate(Omega):
+        W_z_x[j,:,:,j,:,:] += W.reshape(len(dims),num_time,len(dims),num_time)
+    V_z_x = np.linalg.inv(
+        W_z_x.reshape((num_f*len(dims)*num_time,num_f*len(dims)*num_time))) \
+        .reshape((num_f,len(dims),num_time)*2)
+    m_z_x = np.tensordot(
+        np.concatenate([(b.T @ G_S @ (dat - m) @ G_T)[...,None,:]
+            for dat, G_T, G_S, b, m in zip(data, Gamma_T, Gamma_S, beta, mu)], -2),
+        V_z_x, axes=((-3,-2,-1), (0,1,2)))
+
+    V_zf = (np.diagonal(V_z_x,0,0,3).transpose((4,0,1,2,3))
+         + (m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,2,0))
+         @ m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,0,2))
+         / num_trial).reshape((num_f,len(dims),num_time,len(dims),num_time)))
+    
+    # M-step for Pi
+    Sigma = V_zf.reshape((num_f,len(dims)*num_time,len(dims)*num_time))
+    sig = np.sqrt(np.diagonal(Sigma,0,1,2))
+    Rho = Sigma/sig[:,None,:]/sig[:,:,None]
+    if Pi_init:
+        Pi = Pi_init.copy()
+        invPi = np.linalg.inv(Pi)
+    else: 
+        invPi = Rho.copy()
+        Pi = np.linalg.inv(Rho)
+    for i, (iP, R) in enumerate(zip(invPi, Rho)):
+        P = Pi[i].copy()
+        core.glasso(P, iP, R, lambda_glasso,
+                    ths_glasso, max_glasso, ths_lasso, max_lasso)
+        Pi[i] = P
+    
+    return Pi, Rho
+
+def log_like(data, params):
+    """Compute the marginal log-likelihood based on estimated parameters"""
+    Omega = params['Omega']; mu = params['mu']; beta = params['beta']
+    Gamma_S = params['Gamma_S']; Gamma_T = params['Gamma_T']
+    
+    dims = [dat.shape[1] for dat in data]
+    num_time = data[0].shape[2]
+    num_trial = data[0].shape[0]
+    num_f = Omega.shape[0]
+    
+    W_z_x = np.zeros((len(dims),num_f,num_time)*2)
+    for i, (G_S, G_T, b) in enumerate(zip(Gamma_S, Gamma_T, beta)):
+        W_z_x[i,:,:,i,:,:] += G_T[None,:,None,:]*(b.T@G_S@b)[:,None,:,None]
+    for j, W in enumerate(Omega):
+        W_z_x[:,j,:,:,j,:,] += W.reshape(len(dims),num_time,len(dims),num_time)
+    V_z_x = np.linalg.inv(W_z_x.reshape((len(dims)*num_f*num_time,)*2))
+    
+    B = linalg.block_diag(*[np.kron(b,np.eye(num_time)) for b in beta])
+    Gamma = linalg.block_diag(*[np.kron(G_S, G_T) for G_S, G_T in zip(Gamma_S, Gamma_T)])
+    W = Gamma - Gamma@B@V_z_x@B.T@Gamma
+    
+    return (np.linalg.slogdet(W)[1]
+        - np.sum(np.tensordot(np.concatenate(data,-2)-np.concatenate(mu,-2),
+                              W.reshape((np.sum(dims),num_time)*2),
+                              axes=((-2,-1),(-2,-1)))
+        * (np.concatenate(data,-2)-np.concatenate(mu,-2))) / num_trial)
+
+def _dof(params):
+    """Estimate the effective degree of freedom in the parameters"""
+    return (np.sum(params['Omega'] != 0) 
+            + np.sum([np.sum(G_T != 0) for G_T in params['Gamma_T']]))
+
+def AIC(data, params):
+    """Calculate Akaike Information Criterion"""
+    return - 2*log_like(data, params) + 2*_dof(params)
+
+def BIC(data, params):
+    """Calculate Bayesian Information Criterion"""
+    return - 2*log_like(data, params) + np.log(num_sample)*_dof(params)
+    
+def cross_validate(data, num_f, lambdas_cross, offset_cross, **kwargs):
+    """Cross validation to determine cross lambda"""
+    nl = len(lambdas_cross)
+    loglikes = np.zeros(nl)
+    num_trial = data[0].shape[0]
+    num_train= np.int(num_trial*0.8)
+    
+    sample_id = np.random.choice(num_trial, num_trial)
+    dtrain = [dat[sample_id[:num_train],:,:] for dat in data] 
+    dval = [dat[sample_id[:num_train],:,:] for dat in data] 
+    
+    for il in range(nl):
+        lambda_cross = lambdas_cross[il]
+        print('current lambda', lambda_cross)
+        Pi, Rho, params = est(dtrain, num_f, lambda_cross, offset_cross, **kwargs)
+        ll = log_like(dval, params)
+        loglikes[il] = ll
+    return loglikes 
+
 def imshow(image, vmin=None, vmax=None, cmap='RdBu', time=None, identity=False, **kwargs):
+    """Helper function """
     if time:
         assert(image.shape[0] == image.shape[1])
         kwargs['extent'] = [time[0], time[1], time[1], time[0]]
@@ -326,5 +447,4 @@ def imshow(image, vmin=None, vmax=None, cmap='RdBu', time=None, identity=False, 
     plt.imshow(image, cmap=cmap, vmin=vmin, vmax=vmax, **kwargs) 
         
     if identity and time:
-        import matplotlib.pyplot as plt
         plt.plot([time[0], time[1]], [time[0], time[1]], linewidth = 0.3, color='black')
