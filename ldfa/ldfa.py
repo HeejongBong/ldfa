@@ -1,11 +1,25 @@
-import time
+# -*- coding: utf-8 -*-
+"""LDFA-H: Latent Dynamic Factor Analysis of High-dimensional time-series
 
+This module implements the fitting algorithm of LDFA-H and the accessory functions to
+facilitate the associate analyses or inferences. 
+
+Todo
+----
+    * Correct function ``fit_Phi``.
+
+.. _[1] A. Anonymous. (2020). Latent Dynamic Factor Analysis of High-Dimensional Neural Recordings. Submitted to NeurIPS2020.
+
+"""
+
+import time
 import numpy as np
 from scipy import linalg
 
 import ldfa.optimize as core
 
 def _generate_lambda_glasso(bin_num, lambda_glasso, offset, lambda_diag=None):
+    """Generate sparsity penalty matrix Lambda for a submatrix in Pi."""
     lambda_glasso_out = np.full((bin_num, bin_num), -1) + (1+lambda_glasso) * \
            (np.abs(np.arange(bin_num) - np.arange(bin_num)[:,np.newaxis]) <= offset)
     if lambda_diag:
@@ -13,7 +27,7 @@ def _generate_lambda_glasso(bin_num, lambda_glasso, offset, lambda_diag=None):
     return lambda_glasso_out
 
 def _switch_back(Sigma, Phi_S, Gamma_T, Phi_T, beta):
-    """Function to make the initial Phi_S positive definite"""
+    """Make the initial Phi_S positive definite."""
     w, v = np.linalg.eig(Sigma)
     sqrtS = (v*np.sqrt(w)[...,None,:])@v.transpose(0,2,1)
     alpha = np.min(np.linalg.eigvals(
@@ -23,7 +37,7 @@ def _switch_back(Sigma, Phi_S, Gamma_T, Phi_T, beta):
             [P + (b*alpha)@b.T for P, b in zip(Phi_S, beta)])
 
 def _make_PD(m, thres_eigen=1e-4):
-    """Function to make a coariance PSD based on its eigen decomposition"""
+    """Make a coariance PSD based on its eigen decomposition."""
     s, v = np.linalg.eigh(m)
     if np.min(s)<=thres_eigen*np.max(s):
         delta = thres_eigen*np.max(s) - np.min(s)
@@ -31,12 +45,9 @@ def _make_PD(m, thres_eigen=1e-4):
     return (v@np.diag(s)@np.linalg.inv(v))
 
 def _temporal_est(V_eps_T, ar_order):
-    """Perform temporal estimate given V_T
+    """Perform temporal estimate given V_T.
     
-    Keyword Arguments:
-    V_eps_T: V_T for noise
-    ar_order: the bandwidth
-    
+    .. _[1] Bickel, P. J. and Levina, E. (2008). Regularized estimation of large covariance matrices. Ann. Statist., 36(1):199–227.
     """
     num_time = V_eps_T.shape[0]
     resids = np.zeros(num_time)
@@ -71,14 +82,61 @@ def fit(data, num_f, lambda_cross, offset_cross,
         ths_ldfa=1e-2, max_ldfa=1000, ths_glasso=1e-5, max_glasso=1000,
         ths_lasso=1e-5, max_lasso=1000, beta_init=None, make_PD=False,
         verbose=False):
-    """The main function to perform multi-factor estimation.
+    """The main function to perform multi-factor LDFA-H estimation.
     
-    Keyword Arguments:
-    data: observation data from two areas
-    num_f: number of factors
-    lambda_cross: the lambda penalty on off-diagonal part.
+    Parameters
+    ----------
+    data: list of (N, p_k, T) ndarrays
+        Observed data from K areas. Data from each area k consists of p_k-variate
+        time-series over T time bins in N trials. 
+    num_f: int
+        The number of factors.
+    lambda_cross, lambda_auto: float
+        The sparsity penalty parameter for the inverse cross-correlation and inverse
+        auto-correlation matrix, respectively. The default value for lambda_auto is 0.
+    offset_cross, offset_auto: int
+        The bandwidth parameter for the inverse cross-correlation matrix and inverse
+        auto-correlation matrix, respectively. The default value for offset_auto is the
+        given value of offset_cross.
+    ths_ldfa, ths_glasso, ths_lasso: float, optional
+        The threshold values for deciding the convergence of the main iteration, the
+        glasso iteration, and the lasso iteration, respectively.
+    max_ldfa, max_glasso, max_lasso: int, optional
+        The maximum number of iteration for the main iteration, the glasso iteration,
+        and the lasso iteration, respectively.
+    beta_init: list of (p_k, num_f) ndarrays, optional
+        Custom initial values for beta. If not given, beta is initialized by CCA.
+    make_PD: boolean, optional
+        Switch for manual positive definitization. If data does not generate a positive
+        definite estimate of the covariance matrix, ``make_PD = True`` helps with 
+        maintaining the matrix positive definite throughout the fitting algorithm. The
+        default value is False for the sake of running time.
+    verbose: boolean, optional
+        Swith for vocal feedback throughout the fitting algorithm. The default value is
+        False.
+   
+    Returns
+    -------
+    Pi: (K*T, K*T) ndarray
+        The estimated sparse inverse correlation matrix.
+    Rho: (K*T, K*T) ndarray
+        The estimated correlation matrix before sparsification. Note that Rho != Pi^{-1}.
+    params: dict
+        The dictionary of the estimated parameters. It provides with the estimation of
+            Omega: (num_f, K*T, K*T) ndarray; 
+            Gamma_S: a list of (p_k, p_k) ndarrays for k = 1, ..., K;
+            Gamma_T: a list of (T, T) ndarrays for k = 1, ..., K;
+            beta: a list of (p_k, num_f) ndarrays for k = 1, ..., K; and
+            mu: a list of (p_k, T) ndarrays for k = 1, ..., K. 
+    
+    Examples
+    --------
+    Pi, Rho, params =\
+        fit(data, num_f, lambda_cross, offset_cross, lambda_auto, offset_auto)
+                 
+    .. _[1] A. Anonymous. (2020). Latent Dynamic Factor Analysis of High-Dimensional Neural Recordings. Submitted to NeurIPS2020.
+    
     """
-    
     dims = [dat.shape[1] for dat in data]
     num_time = data[0].shape[2]
     num_trial = data[0].shape[0]
@@ -179,13 +237,13 @@ def fit(data, num_f, lambda_cross, offset_cross,
     Omega = Pi/sig[:,None,:]/sig[:,:,None]
     
     cost = (- log_like(data, {'Omega': Omega, 'beta': beta, 'mu': mu, 
-                              'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) + 
+                              'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) / num_trial+ 
               np.sum(np.where(lambda_glasso*np.abs(Pi)>=0, 
                               lambda_glasso*np.abs(Pi), np.inf)))
     
     # EM algorithm
     for iter_ldfa in np.arange(max_ldfa):
-        Rho_ldfa = Rho.copy()
+        iPi_ldfa = np.linalg.inv(Pi)
         beta_ldfa = [b.copy() for b in beta]
         cost_ldfa = cost
         start_ldfa = time.time()
@@ -283,11 +341,11 @@ def fit(data, num_f, lambda_cross, offset_cross,
 
         # calculate cost
         cost = (- log_like(data,{'Omega': Omega, 'beta': beta, 'mu': mu, 
-                                 'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) + 
+                                 'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) / num_trial + 
                   np.sum(np.where(lambda_glasso*np.abs(Pi)>=0, 
                                   lambda_glasso*np.abs(Pi), np.inf)))
 
-        change_Sigma = np.max(np.abs(Rho - Rho_ldfa))
+        change_Sigma = np.max(np.abs(np.linalg.inv(Pi) - iPi_ldfa))
         change_beta = np.max([1-np.sum(b1*b2,0)/np.sqrt(np.sum(b1**2,0)*np.sum(b2**2,0)) 
                          for b1, b2 in zip(beta, beta_ldfa)])
         change_cost = cost_ldfa - cost
@@ -304,19 +362,76 @@ def fit(data, num_f, lambda_cross, offset_cross,
                      'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}  
 
 def fit_Pi(data, params, lambda_cross, offset_cross, 
-           lambda_auto=None, offset_auto=None, Pi_init=None,
-           ths_glasso=1e-5, max_glasso=1000, ths_lasso=1e-5, max_lasso=1000, 
-           verbose=False):
-    """Conditional estimate of Pi given other parameters"""
+           lambda_auto=None, offset_auto=None, 
+           ths_ldfa=1e-4, max_ldfa=1000, ths_glasso=1e-5, max_glasso=1000, 
+           ths_lasso=1e-5, max_lasso=1000, verbose=False):
+    """Conditional estimate of Pi given other parameters
     
-    Omega = params['Omega']; mu = params['mu']; beta = params['beta']
-    Gamma_S = params['Gamma_S']; Gamma_T = params['Gamma_T']
+    Parameters
+    ----------
+    data: list of (N, p_k, T) ndarrays
+        Observed data from K areas. Data from each area k consists of p_k-variate
+        time-series over T time bins in N trials. 
+    params: dict
+        The dictionary of the given other parameters, which are
+            Gamma_S: a list of (p_k, p_k) ndarrays for k = 1, ..., K;
+            Gamma_T: a list of (T, T) ndarrays for k = 1, ..., K;
+            beta: a list of (p_k, num_f) ndarrays for k = 1, ..., K; and
+            mu: a list of (p_k, T) ndarrays for k = 1, ..., K. 
+    lambda_cross, lambda_auto: float
+        The sparsity penalty parameter for the inverse cross-correlation and inverse
+        auto-correlation matrix, respectively. The default value for lambda_auto is 0.
+    offset_cross, offset_auto: int
+        The bandwidth parameter for the inverse cross-correlation matrix and inverse
+        auto-correlation matrix, respectively. The default value for offset_auto is the
+        given value of offset_cross.
+    ths_ldfa, ths_glasso, ths_lasso: float, optional
+        The threshold values for deciding the convergence of the main iteration, the
+        glasso iteration, and the lasso iteration, respectively.
+    max_ldfa, max_glasso, max_lasso: int, optional
+        The maximum number of iteration for the main iteration, the glasso iteration,
+        and the lasso iteration, respectively.
+    beta_init: list of (p_k, num_f) ndarrays, optional
+        Custom initial values for beta. If not given, beta is initialized by CCA.
+    make_PD: boolean, optional
+        Switch for manual positive definitization. If data does not generate a positive
+        definite estimate of the covariance matrix, ``make_PD = True`` helps with 
+        maintaining the matrix positive definite throughout the fitting algorithm. The
+        default value is False for the sake of running time.
+    verbose: boolean, optional
+        Swith for vocal feedback throughout the fitting algorithm. The default value is
+        False.
+   
+    Returns
+    -------
+    Pi: (K*T, K*T) ndarray
+        The estimated sparse inverse correlation matrix.
+    Rho: (K*T, K*T) ndarray
+        The estimated correlation matrix before sparsification. Note that Rho != Pi^{-1}.
+    
+    Examples
+    --------
+    Pi, Rho =\
+        fit(data, params, lambda_cross, offset_cross, lambda_auto, offset_auto)
+                 
+    .. _[1] A. Anonymous. (2020). Latent Dynamic Factor Analysis of High-Dimensional Neural Recordings. Submitted to NeurIPS2020.
+    
+    """
+    
+    Omega = params['Omega'].copy()
+    beta = params['beta']; Gamma_S = params['Gamma_S']; Gamma_T = params['Gamma_T']
+    mu= [np.mean(dat, 0) for dat in data]
     
     dims = [data[0].shape[1], data[1].shape[1]]
     num_time = data[0].shape[2]
     num_trial = data[0].shape[0]
     num_f = Omega.shape[0]
     
+    Sigma = np.linalg.inv(Omega)
+    sig = np.sqrt(np.diagonal(Sigma,0,1,2))
+    Rho = Sigma/sig[:,None,:]/sig[:,:,None]
+    Pi = Omega*sig[:,None,:]*sig[:,:,None]
+
     # get full_graph
     if lambda_auto is None:
         lambda_auto = lambda_cross
@@ -331,45 +446,89 @@ def fit_Pi(data, params, lambda_cross, offset_cross,
           for j, _ in enumerate(data)]
          for i, _ in enumerate(data)])) 
     
-    # E-step
-    W_z_x = np.zeros((num_f,len(dims),num_time)*2)
-    for i, (G_S, G_T, b) in enumerate(zip(Gamma_S, Gamma_T, beta)):
-        W_z_x[:,i,:,:,i,:] += G_T[None,:,None,:]*(b.T@G_S@b)[:,None,:,None]
-    for j, W in enumerate(Omega):
-        W_z_x[j,:,:,j,:,:] += W.reshape(len(dims),num_time,len(dims),num_time)
-    V_z_x = np.linalg.inv(
-        W_z_x.reshape((num_f*len(dims)*num_time,num_f*len(dims)*num_time))) \
-        .reshape((num_f,len(dims),num_time)*2)
-    m_z_x = np.tensordot(
-        np.concatenate([(b.T @ G_S @ (dat - m) @ G_T)[...,None,:]
-            for dat, G_T, G_S, b, m in zip(data, Gamma_T, Gamma_S, beta, mu)], -2),
-        V_z_x, axes=((-3,-2,-1), (0,1,2)))
-
-    V_zf = (np.diagonal(V_z_x,0,0,3).transpose((4,0,1,2,3))
-         + (m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,2,0))
-         @ m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,0,2))
-         / num_trial).reshape((num_f,len(dims),num_time,len(dims),num_time)))
+    cost = (- log_like(data, {'Omega': Omega, 'beta': beta, 'mu': mu, 
+                              'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) / num_trial + 
+              np.sum(np.where(lambda_glasso*np.abs(Pi)>=0, 
+                              lambda_glasso*np.abs(Pi), np.inf)))
     
-    # M-step for Pi
-    Sigma = V_zf.reshape((num_f,len(dims)*num_time,len(dims)*num_time))
-    sig = np.sqrt(np.diagonal(Sigma,0,1,2))
-    Rho = Sigma/sig[:,None,:]/sig[:,:,None]
-    if Pi_init:
-        Pi = Pi_init.copy()
-        invPi = np.linalg.inv(Pi)
-    else: 
-        invPi = Rho.copy()
-        Pi = np.linalg.inv(Rho)
-    for i, (iP, R) in enumerate(zip(invPi, Rho)):
-        P = Pi[i].copy()
-        core.glasso(P, iP, R, lambda_glasso,
-                    ths_glasso, max_glasso, ths_lasso, max_lasso)
-        Pi[i] = P
+    for iter_ldfa in np.arange(max_ldfa):
+        iPi_ldfa = np.linalg.inv(Pi)
+        beta_ldfa = [b.copy() for b in beta]
+        cost_ldfa = cost
+        start_ldfa = time.time()
+        
+        # E-step
+        W_z_x = np.zeros((num_f,len(dims),num_time)*2)
+        for i, (G_S, G_T, b) in enumerate(zip(Gamma_S, Gamma_T, beta)):
+            W_z_x[:,i,:,:,i,:] += G_T[None,:,None,:]*(b.T@G_S@b)[:,None,:,None]
+        for j, W in enumerate(Omega):
+            W_z_x[j,:,:,j,:,:] += W.reshape(len(dims),num_time,len(dims),num_time)
+        V_z_x = np.linalg.inv(
+            W_z_x.reshape((num_f*len(dims)*num_time,num_f*len(dims)*num_time))) \
+            .reshape((num_f,len(dims),num_time)*2)
+        m_z_x = np.tensordot(
+            np.concatenate([(b.T @ G_S @ (dat - m) @ G_T)[...,None,:]
+                for dat, G_T, G_S, b, m in zip(data, Gamma_T, Gamma_S, beta, mu)], -2),
+            V_z_x, axes=((-3,-2,-1), (0,1,2)))
+
+        V_zf = (np.diagonal(V_z_x,0,0,3).transpose((4,0,1,2,3))
+             + (m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,2,0))
+             @ m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,0,2))
+             / num_trial).reshape((num_f,len(dims),num_time,len(dims),num_time)))
+
+        # M-step for Pi
+        Sigma = V_zf.reshape((num_f,len(dims)*num_time,len(dims)*num_time))
+        sig = np.sqrt(np.diagonal(Sigma,0,1,2))
+        Rho = Sigma/sig[:,None,:]/sig[:,:,None]
+        for i, (P, R) in enumerate(zip(Pi, Rho)):
+            core.glasso(P, np.linalg.inv(P), R, lambda_glasso,
+                        ths_glasso, max_glasso, ths_lasso, max_lasso)
+            Pi[i] = P
+        Omega = Pi/sig[:,None,:]/sig[:,:,None]
+        
+        # calculate cost
+        cost = (- log_like(data,{'Omega': Omega, 'beta': beta, 'mu': mu, 
+                                 'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) / num_trial + 
+                  np.sum(np.where(lambda_glasso*np.abs(Pi)>=0, 
+                                  lambda_glasso*np.abs(Pi), np.inf)))
+
+        change_Sigma = np.max(np.abs(np.linalg.inv(Pi) - iPi_ldfa))
+        change_beta = np.max([1-np.sum(b1*b2,0)/np.sqrt(np.sum(b1**2,0)*np.sum(b2**2,0)) 
+                         for b1, b2 in zip(beta, beta_ldfa)])
+        change_cost = cost_ldfa - cost
+        lapse = time.time() - start_ldfa
+        if verbose:
+            print("%d-th ldfa iter, dcost: %.2e, dRho: %.2e, dbeta: %.2e,"
+                  "lapse: %.2fsec."
+                  %(iter_ldfa+1, change_cost, change_Sigma, change_beta, lapse))
+
+        if(change_Sigma < ths_ldfa):
+            break
     
     return Pi, Rho
 
 def log_like(data, params):
-    """Compute the marginal log-likelihood based on estimated parameters"""
+    """Compute the marginal log-likelihood based on estimated parameters.
+    
+    Parameters
+    ----------
+    data: list of (N, p_k, T) ndarrays
+        Observed data from K areas. Data from each area k consists of p_k-variate
+        time-series over T time bins in N trials. 
+    params: dict
+        The dictionary of the estimated parameters. It provides with the estimation of
+            Omega: (num_f, K*T, K*T) ndarray; 
+            Gamma_S: a list of (p_k, p_k) ndarrays for k = 1, ..., K;
+            Gamma_T: a list of (T, T) ndarrays for k = 1, ..., K;
+            beta: a list of (p_k, num_f) ndarrays for k = 1, ..., K; and
+            mu: a list of (p_k, T) ndarrays for k = 1, ..., K. 
+            
+    Returns
+    -------
+    float
+        The sample mean log-likelihood of the given parameters wrt. the data.
+            
+    """
     Omega = params['Omega']; mu = params['mu']; beta = params['beta']
     Gamma_S = params['Gamma_S']; Gamma_T = params['Gamma_T']
     
@@ -389,11 +548,11 @@ def log_like(data, params):
     Gamma = linalg.block_diag(*[np.kron(G_S, G_T) for G_S, G_T in zip(Gamma_S, Gamma_T)])
     W = Gamma - Gamma@B@V_z_x@B.T@Gamma
     
-    return (np.linalg.slogdet(W)[1]
+    return (np.linalg.slogdet(W)[1] * num_trial
         - np.sum(np.tensordot(np.concatenate(data,-2)-np.concatenate(mu,-2),
                               W.reshape((np.sum(dims),num_time)*2),
                               axes=((-2,-1),(-2,-1)))
-        * (np.concatenate(data,-2)-np.concatenate(mu,-2))) / num_trial)
+        * (np.concatenate(data,-2)-np.concatenate(mu,-2))))
 
 def _dof(params):
     """Estimate the effective degree of freedom in the parameters"""
@@ -406,7 +565,8 @@ def AIC(data, params):
 
 def BIC(data, params):
     """Calculate Bayesian Information Criterion"""
-    return - 2*log_like(data, params) + np.log(num_sample)*_dof(params)
+    num_trial = data[0].shape[0]
+    return - 2*log_like(data, params) + np.log(num_trial)*_dof(params)
     
 def cross_validate(data, num_f, lambdas_cross, offset_cross, **kwargs):
     """Cross validation to determine cross lambda"""
@@ -428,7 +588,35 @@ def cross_validate(data, num_f, lambdas_cross, offset_cross, **kwargs):
     return loglikes 
 
 def imshow(image, vmin=None, vmax=None, cmap='RdBu', time=None, identity=False, **kwargs):
-    """Helper function """
+    """Color plot function using ``matplotlib.pyplot.imshow`` with dedicated features
+    for illustrating dynamic connectivity between two multivariate time-series.
+    
+    Parameters
+    ----------
+    image: (M, N) ndarray
+        An image data with scalar data, which are colormapped.
+    vmin, vmax: float, optional
+        The range of the scalar values in image data which the colormap covers. If vmax
+        is not given, it is automatically set by the maximum absolute value in image data
+        by default. If vmin is not given, it is automatically set by -vmax.
+    cmap: string or Colormap, optional
+        The Colormap instance or registered colormap name. The default value is 'RdBu'.
+    time: list or tuple of two floats, optional
+        The time range of a dynamic association the function plots. 
+    identity: boolean, optional
+        Switch for drawing the line of simultaneous association in a dynamic association
+        plot. The parameter time should be given alongside.
+    **kwargs
+        Keyword parameters for the function ``matplotlib.pyplot.imshow``. 
+        
+    See Also
+    --------
+    matplotlib.pyplot.imshow
+    
+    Examples
+    --------
+    imshow(Pi[0,0:T,T:2*T], time=(0,T), identity=True)
+    """
     if time:
         assert(image.shape[0] == image.shape[1])
         kwargs['extent'] = [time[0], time[1], time[1], time[0]]
