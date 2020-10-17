@@ -78,7 +78,7 @@ def _temporal_est(V_eps_T, ar_order):
     return Gamma_T_hat, Psi_T_hat
 
 def fit(data, num_f, lambda_cross, offset_cross, 
-        lambda_auto=None, offset_auto=None, 
+        lambda_auto=None, offset_auto=None, lambda_aug=0,
         ths_ldfa=1e-2, max_ldfa=1000, ths_glasso=1e-5, max_glasso=1000,
         ths_lasso=1e-5, max_lasso=1000, beta_init=None, make_PD=False,
         verbose=False):
@@ -198,37 +198,37 @@ def fit(data, num_f, lambda_cross, offset_cross,
 
     m_eps = [dat - b @ m1 - m2
              for dat, m1, b, m2 in zip(data, m_zk_x, beta, mu)]
-    v_eps = [(np.sum(np.square(m))/num_trial 
+    v_eps = [(np.sum(np.square(m))*(1+lambda_aug)/num_trial 
               + np.trace(V.reshape(num_f*num_time,num_f*num_time)))
               # /(d-1)
              for m, V, d in zip(m_eps, V_zk_x, dims)]
 
-    V_eps_S = [np.tensordot(m,m,axes=((0,2),(0,2)))/num_trial/v 
+    V_eps_S = [np.tensordot(m,m,axes=((0,2),(0,2)))*(1+lambda_aug)/num_trial/v 
                + b@np.sum(np.diagonal(V,0,1,3),-1)@b.T/v
                for m, V, v, b, d in zip(m_eps, V_zk_x, v_eps, beta, dims)]
-    V_eps_T = [np.tensordot(m,np.linalg.pinv(V2)@m,
-                            axes=((0,1),(0,1)))/d/num_trial 
+    V_eps_T = [np.tensordot(m,np.linalg.pinv(V2)@m, axes=((0,1),(0,1)))
+               *(lambda_aug*np.eye(num_time)+1)/d/num_trial 
                + np.tensordot(V1,b.T@np.linalg.pinv(V2)@b,axes=([0,2],[0,1]))/d
                for m, V1, V2, b, d in zip(m_eps, V_zk_x, V_eps_S, beta, dims)]
+    sd_eps_T = [np.sqrt(np.diag(V)) for V in V_eps_T]
+    R_eps_T = [V/sd/sd[:,None] for V, sd in zip(V_eps_T, sd_eps_T)]
 
-    Phi_T = [V.copy() for V in V_eps_T]
-    if make_PD:
-        Phi_T = [_make_PD(P) for P in Phi_T]
+    Phi_T = [R*sd*sd[:,None] for sd, R in zip(sd_eps_T, R_eps_T)]
     Gamma_T = [np.linalg.inv(P) for P in Phi_T]
 
     V_zf = (np.diagonal(V_z_x,0,0,3).transpose((4,0,1,2,3))
          + (m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,2,0))
          @ m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,0,2))
-         / num_trial).reshape((num_f,len(dims),num_time,len(dims),num_time)))
+         * (lambda_aug*np.eye(2*num_time)+1)/ num_trial)\
+         .reshape((num_f,len(dims),num_time,len(dims),num_time)))
 
-    Sigma, Phi_S = _switch_back(
+    Sigma, Phi_S = switch_back(
         V_zf.reshape(num_f,len(dims)*num_time,len(dims)*num_time),
         V_eps_S, Gamma_T, Phi_T, beta)
     if make_PD:
         Phi_S = [_make_PD(P) for P in Phi_S]
         for f in np.arange(num_f):
             Sigma[f] = _make_PD(Sigma[f])
-        
     Gamma_S = [np.linalg.inv(P) for P in Phi_S]
 
     sig = np.sqrt(np.diagonal(Sigma,0,1,2))
@@ -243,91 +243,106 @@ def fit(data, num_f, lambda_cross, offset_cross,
     
     # EM algorithm
     for iter_ldfa in np.arange(max_ldfa):
-        iPi_ldfa = np.linalg.inv(Pi)
+        Rho_ldfa = Rho.copy() # np.linalg.inv(Pi)
         beta_ldfa = [b.copy() for b in beta]
         cost_ldfa = cost
         start_ldfa = time.time()
 
-        # E-step
+        # E-step for Z
         W_z_x = np.zeros((num_f,len(dims),num_time)*2)
         for i, (G_S, G_T, b) in enumerate(zip(Gamma_S, Gamma_T, beta)):
             W_z_x[:,i,:,:,i,:] += G_T[None,:,None,:]*(b.T@G_S@b)[:,None,:,None]
         for j, W in enumerate(Omega):
             W_z_x[j,:,:,j,:,:] += W.reshape(len(dims),num_time,len(dims),num_time)
+
         V_z_x = np.linalg.inv(
             W_z_x.reshape((num_f*len(dims)*num_time,num_f*len(dims)*num_time))) \
             .reshape((num_f,len(dims),num_time)*2)
-        m_z_x = np.tensordot(
-            np.concatenate([(b.T @ G_S @ (dat - m) @ G_T)[...,None,:]
-                for dat, G_T, G_S, b, m in zip(data, Gamma_T, Gamma_S, beta, mu)], -2),
-            V_z_x, axes=((-3,-2,-1), (0,1,2)))
-
         V_zk_x = np.diagonal(V_z_x,0,1,4).transpose(4,0,1,2,3)
-        m_zk_x = m_z_x.transpose((2,0,1,3))
 
-        V_zf = (np.diagonal(V_z_x,0,0,3).transpose((4,0,1,2,3))
-             + (m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,2,0))
-             @ m_z_x.reshape((-1,num_f,len(dims)*num_time)).transpose((1,0,2))
-             / num_trial).reshape((num_f,len(dims),num_time,len(dims),num_time)))
-        
-        # M-step for Phi, beta
+        y = np.stack([(b.T @ G_S) @ (dat - m) for dat, m, b, G_S
+                       in zip(data, mu, beta, Gamma_S)], axis=-2)
+        S_y = np.tensordot(y, y, (0,0)) / num_trial \
+              * (lambda_aug*np.eye(len(dims)*num_time)
+                 .reshape(len(dims),num_time,1,len(dims),num_time)+1)
+        V_z_y = np.stack([np.tensordot(V_z_x[...,i,:], G_T, [-1, 0])
+                          for i, G_T in enumerate(Gamma_T)], -2)
+        S_mz = np.tensordot(np.tensordot(V_z_y, S_y, [(-3,-2,-1),(0,1,2)]),
+                            V_z_y, [(-3,-2,-1),(-3,-2,-1)])
+
         for iter_pb in np.arange(10):
             beta_pb = [b.copy() for b in beta]
 
-            m_eps = [dat - b @ m1 - m2 for dat, m1, b, m2 
-                     in zip(data, m_zk_x, beta, mu)]
+            # coordinate descent for beta
+            S_mz_x_S = [np.tensordot(np.tensordot(y, np.stack(
+                [(np.tensordot(Gamma_T[i], V_z_y[:,i,:,:,j,:], [-1,1]) 
+                 * (lambda_aug*(i==j)*np.eye(num_time)+1)[:,None,None,:])
+                 for j in np.arange(len(dims))], -2), [(-3,-2,-1),(-3,-2,-1)]),
+                data[i] - mu[i], [(0,1),(0,-1)]) / num_trial
+                for i in np.arange(len(dims))]
+            S_mz_S = [np.tensordot(S_mz[:,i,:,:,i,:], G_T, 
+                                    [(-3,-1),(0,1)]) 
+                      for i, G_T in enumerate(Gamma_T)]
+
+            beta = [S1.T @ np.linalg.inv(S2 + np.tensordot(G_T, V, axes=((0,1),(1,3))))
+                    for S1, S2, V, G_T in zip(S_mz_x_S, S_mz_S, V_zk_x, Gamma_T)]
 
             # fitting Matrix-variate for Phi_S
-            V_eps_S = [np.tensordot(m @ G_T,m,axes=((0,2),(0,2)))/num_trial/num_time 
-                       + b@np.sum(V * G_T[:,None,:], (-3,-1))@b.T/num_time
-                       for m, V, G_T, b, d in zip(m_eps, V_zk_x, Gamma_T, beta, dims)]
+            V_eps_S = [
+                (np.tensordot((dat-m) @ (G_T*(lambda_aug*np.eye(num_time)+1)), dat-m,
+                               axes=((0,2),(0,2)))/num_trial
+                - b @ S1 - S1.T @ b.T + b @ S2 @ b.T
+                + b @ np.tensordot(V, G_T, [(-3,-1),(0,1)]) @ b.T)/num_time
+                for dat, m, b, G_T, V, S1, S2
+                in zip(data, mu, beta, Gamma_T, V_zk_x, S_mz_x_S, S_mz_S)]
             Phi_S = [V.copy() for V in V_eps_S]
-            if make_PD:
-                Phi_S = [_make_PD(P) for P in Phi_S]
             Gamma_S = [np.linalg.inv(P) for P in Phi_S]
 
             # fitting Matrix_variate for Phi_T
-            V_eps_T = [np.tensordot(m,G_S@m,axes=((0,1),(0,1)))/d/num_trial 
-                       + np.tensordot(V,b.T@G_S@b,axes=([0,2],[0,1]))/d
-                       for m, V, G_S, b, d in zip(m_eps, V_zk_x, Gamma_S, beta, dims)]
-            Phi_T = [V.copy() for V in V_eps_T]
-            if make_PD:
-                Phi_T = [_make_PD(P) for P in Phi_T]
+            y1 = np.stack([(b.T @ G_S) @ (dat - m) for dat, m, b, G_S
+                           in zip(data, mu, beta, Gamma_S)], axis=-2)
+            S_y_y1 = np.tensordot(y, y1, (0,0)) / num_trial \
+                  * (lambda_aug*np.eye(len(dims)*num_time)
+                     .reshape(len(dims),num_time,1,len(dims),num_time)+1)
+
+            S_bmz_x_T = [np.tensordot(V_z_y[:,i,:,:,:,:], S_y_y1[:,:,:,:,i,:],
+                                      [(0,2,3,4),(3,0,1,2)])
+                         for i in np.arange(len(dims))]
+            S_bmz_T = [np.tensordot(S_mz[:,i,:,:,i,:], b.T @ G_S @ b, [(0,2),(0,1)])
+                       for i, (b, G_S) in enumerate(zip(beta, Gamma_S))]
+
+            V_eps_T = [
+                (np.tensordot(dat-m, G_S@(dat-m), axes=((0,1),(0,1)))/num_trial
+                * (lambda_aug * np.eye(num_time) + 1) - S1 - S1.T + S2
+                + np.tensordot(V, b.T@G_S@b, axes=([0,2],[0,1])))/d
+                for dat, d, m, b, G_S, V, S1, S2 
+                in zip(data, dims, mu, beta, Gamma_S, V_zk_x, S_bmz_x_T, S_bmz_T)]
             sd_eps_T = [np.sqrt(np.diag(V)) for V in V_eps_T]
             R_eps_T = [V/sd/sd[:,None] for V, sd in zip(V_eps_T, sd_eps_T)]
 
-            for i, (Rt, sd, d) in enumerate(zip(R_eps_T, sd_eps_T, dims)):
-                Tt, Pt = _temporal_est(Rt, offset_auto)
+            for i, (Rt, sd, d) \
+            in enumerate(zip(R_eps_T, sd_eps_T, dims)):
+                Tt, Pt = temporal_est(Rt, offset_auto)
                 Gamma_T[i] = Tt / sd / sd[:,None]
                 Phi_T[i] = Pt * sd * sd[:,None]
 
-            # coordinate descent for beta
-            beta = [
-                np.tensordot(G_T,np.tensordot(dat-np.mean(dat,0),m,axes=(0,0))/num_trial,
-                             axes=((0,1),(1,3)))
-                @ np.linalg.inv(np.tensordot(G_T,V+np.tensordot(m,m,axes=(0,0))/num_trial,
-                                             axes=((0,1),(1,3))))
-                for G_T, V, dat, m in zip(Gamma_T, V_zk_x, data, 
-                                          [m-np.mean(m,0) for m in m_zk_x])
-            ]
-            
             # M-step for mu
-#             mu = [np.mean(dat - b @ m, 0) for dat, m, b in zip(data, m_zk_x, beta)]
+            # mu = [np.mean(dat - b @ m, 0) for dat, m, b in zip(data, m_zk_x, beta)]
 
             beta_diff = [1-np.sum(b1*b2,0)/np.sqrt(np.sum(b1**2,0)*np.sum(b2**2,0)) 
                          for b1, b2 in zip(beta, beta_pb)]
             if np.max(beta_diff) < 1e-12:
-                break
+                break 
 
         # Normalize beta
-        b_norm = np.concatenate([np.sqrt(np.sum(b**2,0))[:,None] for b in beta], -1)
-        Sigma = (V_zf * b_norm[:,:,None,None,None] * b_norm[:,None,None,:,None]) \
-                 .reshape((num_f,len(dims)*num_time,len(dims)*num_time))
-        beta = [b / np.sqrt(np.sum(b**2, 0)) for b in beta]
-        
-        if make_PD:
-            for f in np.arange(num_f):
-                Sigma[f] = _make_PD(Sigma[f])
+        V_zf = (np.diagonal(V_z_x,0,0,3)+np.diagonal(S_mz,0,0,3)).transpose(4,0,1,2,3)    
+        B = np.concatenate([np.sqrt(np.sum(b**2,0))[:,None] for b in beta], -1)
+        Sigma = (V_zf * B[:,:,None,None,None] * B[:,None,None,:,None]) \
+                .reshape((num_f,len(dims)*num_time,len(dims)*num_time))
+        beta = [b / np.sqrt(np.sum(b**2, 0)) for b in beta]    
+
+        # Switch forward
+    #     Sigma, Phi_S = switch_forward(Sigma, Phi_S, Phi_T, beta)
 
         # M-step for Pi
         sig = np.sqrt(np.diagonal(Sigma,0,1,2))
@@ -339,13 +354,16 @@ def fit(data, num_f, lambda_cross, offset_cross,
             Pi[i] = P
         Omega = Pi/sig[:,None,:]/sig[:,:,None]
 
-        # calculate cost
-        cost = (- log_like(data,{'Omega': Omega, 'beta': beta, 'mu': mu, 
-                                 'Gamma_S': Gamma_S, 'Gamma_T': Gamma_T}) / num_trial + 
-                  np.sum(np.where(lambda_glasso*np.abs(Pi)>=0, 
-                                  lambda_glasso*np.abs(Pi), np.inf)))
+        # Switch back
+    #     Sigma, Phi_S = switch_back(Sigma, Phi_S, Theta_T, beta)
+    #     Omega = np.linalg.inv(Sigma)
+    #     Theta_S = [np.linalg.inv(P) for P in Phi_S]
 
-        change_Sigma = np.max(np.abs(np.linalg.inv(Pi) - iPi_ldfa))
+        # calculate cost
+        cost = nll4(data, Omega, beta, Gamma_S, Gamma_T, mu, lambda_aug)\
+               + np.sum(np.where(lambda_glasso*np.abs(Pi)>=0, lambda_glasso*np.abs(Pi), np.inf))
+
+        change_Sigma = np.max(np.abs(Rho - Rho_ldfa))
         change_beta = np.max([1-np.sum(b1*b2,0)/np.sqrt(np.sum(b1**2,0)*np.sum(b2**2,0)) 
                          for b1, b2 in zip(beta, beta_ldfa)])
         change_cost = cost_ldfa - cost
@@ -507,7 +525,7 @@ def fit_Pi(data, params, lambda_cross, offset_cross,
     
     return Pi, Rho
 
-def log_like(data, params):
+def log_like(data, params, lambda_aug=0):
     """Compute the marginal log-likelihood based on estimated parameters.
     
     Parameters
@@ -542,17 +560,47 @@ def log_like(data, params):
         W_z_x[i,:,:,i,:,:] += G_T[None,:,None,:]*(b.T@G_S@b)[:,None,:,None]
     for j, W in enumerate(Omega):
         W_z_x[:,j,:,:,j,:,] += W.reshape(len(dims),num_time,len(dims),num_time)
-    V_z_x = np.linalg.inv(W_z_x.reshape((len(dims)*num_f*num_time,)*2))
+    V_z_x = np.linalg.inv(
+        W_z_x.reshape((num_f*len(dims)*num_time,num_f*len(dims)*num_time))) \
+        .reshape((num_f,len(dims),num_time)*2)
     
-    B = linalg.block_diag(*[np.kron(b,np.eye(num_time)) for b in beta])
-    Gamma = linalg.block_diag(*[np.kron(G_S, G_T) for G_S, G_T in zip(Gamma_S, Gamma_T)])
-    W = Gamma - Gamma@B@V_z_x@B.T@Gamma
+    y = np.stack([(b.T @ G_S) @ (dat - m) for dat, m, b, G_S
+               in zip(data, mu, beta, Gamma_S)], axis=-2)
+    S_y = np.tensordot(y, y, (0,0)) / num_trial \
+          * (lambda_aug*np.eye(len(dims)*num_time)
+             .reshape(len(dims),num_time,1,len(dims),num_time)+1)
+    V_z_y = np.matmul(V_z_x, np.array(Gamma_T)[:,:,:,...],
+                      axes=[(-3,-1),(-2,-1),(-3,-1)])
     
-    return (np.linalg.slogdet(W)[1] * num_trial
-        - np.sum(np.tensordot(np.concatenate(data,-2)-np.concatenate(mu,-2),
-                              W.reshape((np.sum(dims),num_time)*2),
-                              axes=((-2,-1),(-2,-1)))
-        * (np.concatenate(data,-2)-np.concatenate(mu,-2))))
+    S_mz = np.tensordot(np.tensordot(V_z_y, S_y, [(-3,-2,-1),(0,1,2)]),
+                        V_z_y, [(-3,-2,-1),(-3,-2,-1)])
+    S_bmz_x_T = np.sum(np.diagonal(
+    np.diagonal(np.tensordot(V_z_y, S_y, [(-3,-2,-1),(0,1,2)]),0,1,4),
+    0,0,2),-1).transpose(2,0,1)
+    S_bmz_T = [np.tensordot(S_mz[:,i,:,:,i,:], b.T @ G_S @ b, [(0,2),(0,1)])
+        for i, (b, G_S) in enumerate(zip(beta, Gamma_S))]
+    
+    m_z_x = np.tensordot(y, V_z_y, [(-3,-2,-1),(-3,-2,-1)])
+    m_zk_x = m_z_x.transpose((2,0,1,3))
+
+    S_zf = (np.diagonal(S_mz,0,0,3)).transpose(4,0,1,2,3)
+    S_eps_T = [
+        ( np.tensordot(dat-m,G_S@(dat-m),axes=((0,1),(0,1)))/num_trial
+        * (lambda_aug*np.eye(num_time)+1)
+        - S1 - S1.T + S2)
+        for i, (dat, d, m, b, G_S, S1, S2) 
+        in enumerate(zip(data, dims, mu, beta, Gamma_S, S_bmz_x_T, S_bmz_T))
+    ]
+    
+    return num_trial * (
+    - np.sum(np.linalg.slogdet(Omega)[1])
+    - np.sum(
+        [d * np.linalg.slogdet(G_T)[1] 
+         + num_time * np.linalg.slogdet(G_S)[1]
+        for d, G_T, G_S in zip(dims, Gamma_T, Gamma_S)])
+    - np.linalg.slogdet(V_z_x.reshape((num_f*len(dims)*num_time,)*2))[1]
+    + np.sum(S_zf.reshape(num_f,len(dims)*num_time,len(dims)*num_time)*Omega)
+    + np.sum([np.sum(S_T*G_T) for S_T, G_T in zip(S_eps_T, Gamma_T)]))
 
 def _dof(params):
     """Estimate the effective degree of freedom in the parameters"""
