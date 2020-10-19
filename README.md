@@ -30,7 +30,7 @@ python setup.py install
 
 ## Experimental data 
 
-The data are available in `/data/`. The data file `lfp_beta_1.mat` consists of arrays `pfc_lfpb` and `v4_lfpb` which are the beta band-passed filtered LFP in PFC and V4, respectively. The original dataset is collected by Khanna, Scott, and Smith (2020) [[2](#KSS19)]. Due to the file size limit, we share a spatially/temporally sub-sampled dataset.
+The data are available in `/data/`. The data file consists of `v4_lfp_beta` and `pfc_lfp_beta` which are the beta band-passed filtered LFP in PFC and V4, respectively. `maps.mat` contains the spatial arrangement of the 96 electrodes on each Utah array. The original data are collected by Khanna, Scott, and Smith (2020) [[2](#KSS19)].
 
 ## Reproducible Ipython notebooks
 
