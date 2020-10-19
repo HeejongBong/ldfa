@@ -18,7 +18,7 @@ Package `ldfa` requires:
 
 Clone this repo through github:
 ```bash
-git clone https://github.com/AutoAnonymous/ldfa.git
+git clone https://github.com/HeejongBong/ldfa.git
 ```
 
 ### `Python` install
