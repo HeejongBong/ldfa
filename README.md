@@ -38,8 +38,8 @@ The scripts are available in `/example/`. The script for simulation analysis is 
 
 ## References
 
-<a name="BLRSVK20"> [1] Bong, H., Liu, Z., Ren, Z., Smith, M. A., Ventura, V., & Kass, R. E. (2020). Latent Dynamic Factor Analysis of High-Dimensional Neural Recordings. *Submitted to NeurIPS2020*. </a>
+<a name="BLRSVK20"> [1] Bong, H., Liu, Z., Ren, Z., Smith, M. A., Ventura, V., & Kass, R. E. (2020). Latent Dynamic Factor Analysis of High-Dimensional Neural Recordings. *Advances in neural information processing systems, 33,* 16446-16456.
 
-<a name="KSS19"> [2] Khanna, S. B., Scott, J. A., & Smith, M. A. (2020). Dynamic shifts of visual and saccade signals in prefrontal cortical regions 8Ar and FEF. *Journal of neurophysiology*. In press. </a>
+<a name="KSS19"> [2] Khanna, S. B., Scott, J. A., & Smith, M. A. (2020). Dynamic shifts of visual and saccade signals in prefrontal cortical regions 8Ar and FEF. *Journal of Neurophysiology, 124(6),* 1774-1791.
 
-<a name="RKBMK18"> [3] Rodu, J., Klein, N., Brincat, S. L., Miller, E. K., & Kass, R. E. (2018). Detecting multivariate cross-correlation between brain regions. *Journal of neurophysiology*, 120(4), 1962-1972. </a>
+<a name="RKBMK18"> [3] Rodu, J., Klein, N., Brincat, S. L., Miller, E. K., & Kass, R. E. (2018). Detecting multivariate cross-correlation between brain regions. *Journal of neurophysiology, 120(4),* 1962-1972. </a>
